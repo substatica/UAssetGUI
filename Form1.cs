@@ -1,9 +1,11 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.Design;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -368,6 +370,7 @@ namespace UAssetGUI
 
                 saveToolStripMenuItem.Enabled = true;
                 saveAsToolStripMenuItem.Enabled = true;
+                findToolStripMenuItem.Enabled = true;
 
                 tableEditor.FillOutTree();
                 tableEditor.Load();
@@ -436,6 +439,7 @@ namespace UAssetGUI
                 tableEditor = null;
                 saveToolStripMenuItem.Enabled = false;
                 saveAsToolStripMenuItem.Enabled = false;
+                findToolStripMenuItem.Enabled = false;
 
                 listView1.Nodes.Clear();
                 dataGridView1.Columns.Clear();
@@ -591,12 +595,373 @@ namespace UAssetGUI
 
         private void copyToolStripMenuItem_Click(object sender, EventArgs e)
         {
+            if (tableEditor == null) return;
+            if (dataGridView1.IsCurrentCellInEditMode)
+            {
+                // fallback to normal operating system buffer
+                SendKeys.Send("^C");
+                return;
+            }
+
+            int rowIndex = dataGridView1.SelectedCells.Count > 0 ? dataGridView1.SelectedCells[0].RowIndex : -1;
+            object objectToCopy = null;
+
+            switch (tableEditor.mode)
+            {
+                case TableHandlerMode.ExportData:
+                    if (listView1.SelectedNode is PointingTreeNode pointerNode)
+                    {
+                        if (pointerNode.Type == PointingTreeNodeType.ByteArray)
+                        {
+                            string parsedData = BitConverter.ToString(pointerNode.Pointer is RawExport ? ((RawExport)pointerNode.Pointer).Data : ((NormalExport)pointerNode.Pointer).Extras)?.Replace("-", " ");
+                            Clipboard.SetText(string.IsNullOrWhiteSpace(parsedData) ? "zero" : parsedData);
+                            return;
+                        }
+                        else if (pointerNode.Pointer is StructPropertyData copyingDat1)
+                        {
+                            if (listView1.Focused) objectToCopy = copyingDat1;
+                            if (rowIndex >= 0 && !listView1.Focused && copyingDat1.Value.Count > rowIndex) objectToCopy = copyingDat1.Value[rowIndex];
+                        }
+                        else if (pointerNode.Pointer is ArrayPropertyData copyingDat2)
+                        {
+                            if (listView1.Focused) objectToCopy = copyingDat2;
+                            if (rowIndex >= 0 && !listView1.Focused && copyingDat2.Value.Length > rowIndex) objectToCopy = copyingDat2.Value[rowIndex];
+                        }
+                        else if (pointerNode.Pointer is PointingDictionaryEntry copyingDat3)
+                        {
+                            // don't allow copying the dictionary entry itself
+                            if (rowIndex >= 0) objectToCopy = listView1.ContainsFocus ? null : (rowIndex == 0 ? copyingDat3.Entry.Key : copyingDat3.Entry.Value);
+                        }
+                        else if (pointerNode.Pointer is PropertyData[] copyingDat4)
+                        {
+                            if (listView1.Focused) objectToCopy = copyingDat4;
+                            if (rowIndex >= 0 && !listView1.Focused && copyingDat4.Length > rowIndex) objectToCopy = copyingDat4[rowIndex];
+                        }
+                        else if (pointerNode.Pointer is Export || (listView1.Focused && pointerNode.WillCopyWholeExport))
+                        {
+                            switch (pointerNode.Type)
+                            {
+                                case PointingTreeNodeType.Normal:
+                                    var copyingDat5 = tableEditor.asset.Exports[pointerNode.ExportNum];
+                                    if (listView1.Focused)
+                                    {
+                                        objectToCopy = copyingDat5;
+                                    }
+                                    else if (copyingDat5 is NormalExport copyingDat6)
+                                    {
+                                        if (rowIndex >= 0 && !listView1.Focused && copyingDat6.Data.Count > rowIndex) objectToCopy = copyingDat6.Data[rowIndex];
+                                    }
+                                    break;
+                            }
+                        }
+                    }
+                    break;
+            }
+
+            if (objectToCopy != null)
+            {
+                Clipboard.SetText(tableEditor.asset.SerializeJsonObject(objectToCopy, Newtonsoft.Json.Formatting.None));
+                return;
+            }
+
+            // fallback to copying raw row data
+            if (rowIndex >= 0)
+            {
+                var currentRow = dataGridView1.Rows[rowIndex];
+                string[] newClipboardText = new string[currentRow.Cells.Count];
+                for (int i = 0; i < currentRow.Cells.Count; i++)
+                {
+                    newClipboardText[i] = currentRow.Cells[i].Value?.ToString() ?? string.Empty;
+                }
+                Clipboard.SetText(JsonConvert.SerializeObject(newClipboardText, Formatting.None));
+                return;
+            }
+
+            // fallback to normal operating system buffer
             SendKeys.Send("^C");
+        }
+
+        private TreeNode SearchForTreeNode(TreeView node, int expNum)
+        {
+            foreach (TreeNode entry in node.Nodes)
+            {
+                TreeNode res = SearchForTreeNode(entry, expNum);
+                if (res != null) return res;
+            }
+            return null;
+        }
+
+        private TreeNode SearchForTreeNode(TreeNode node, int expNum)
+        {
+            foreach (TreeNode entry in node.Nodes)
+            {
+                if (node is PointingTreeNode pointerNode2 && pointerNode2.ExportNum == expNum) return pointerNode2;
+                
+                TreeNode res = SearchForTreeNode(entry, expNum);
+                if (res != null) return res;
+            }
+            return null;
         }
 
         private void pasteToolStripMenuItem_Click(object sender, EventArgs e)
         {
+            if (dataGridView1.IsCurrentCellInEditMode)
+            {
+                // fallback to normal operating system buffer
+                SendKeys.Send("^V");
+                return;
+            }
+
+            if (dataGridView1.ReadOnly || !dataGridView1.AllowUserToAddRows) return;
+            if (tableEditor == null) return;
+
+            int rowIndex = dataGridView1.SelectedCells.Count > 0 ? dataGridView1.SelectedCells[0].RowIndex : -1;
+
+            PropertyData deserializedClipboard = null;
+            try
+            {
+                deserializedClipboard = tableEditor.asset.DeserializeJsonObject(Clipboard.GetText()) as PropertyData;
+            }
+            catch (Exception)
+            {
+                // the thing we're trying to paste probably isn't a PropertyData
+            }
+
+            switch (tableEditor.mode)
+            {
+                case TableHandlerMode.ExportData:
+                    if (listView1.SelectedNode is PointingTreeNode pointerNode)
+                    {
+                        if (pointerNode.Type == PointingTreeNodeType.ByteArray)
+                        {
+                            try
+                            {
+                                if (pointerNode.Pointer is RawExport)
+                                {
+                                    ((RawExport)pointerNode.Pointer).Data = Clipboard.GetText() == "zero" ? new byte[0] : UAPUtils.ConvertHexStringToByteArray(Clipboard.GetText());
+                                }
+                                else if (pointerNode.Pointer is NormalExport)
+                                {
+                                    ((NormalExport)pointerNode.Pointer).Extras = Clipboard.GetText() == "zero" ? new byte[0] : UAPUtils.ConvertHexStringToByteArray(Clipboard.GetText());
+                                }
+                            }
+                            catch (Exception)
+                            {
+                                // the thing we're trying to paste probably isn't a byte array
+                            }
+
+                            SetUnsavedChanges(true);
+                            if (tableEditor != null)
+                            {
+                                tableEditor.Load();
+                            }
+                            return;
+                        }
+                        else if (pointerNode.Pointer is StructPropertyData copyingDat1 && deserializedClipboard != null)
+                        {
+                            if (rowIndex < 0) return;
+                            copyingDat1.Value.Insert(rowIndex, deserializedClipboard);
+
+                            SetUnsavedChanges(true);
+                            if (tableEditor != null)
+                            {
+                                tableEditor.Load();
+                            }
+                            return;
+                        }
+                        else if (pointerNode.Pointer is ArrayPropertyData copyingDat2 && deserializedClipboard != null)
+                        {
+                            if (rowIndex < 0) return;
+                            List<PropertyData> origArr = copyingDat2.Value.ToList();
+                            origArr.Insert(rowIndex, deserializedClipboard);
+                            copyingDat2.Value = origArr.ToArray();
+
+                            SetUnsavedChanges(true);
+                            if (tableEditor != null)
+                            {
+                                tableEditor.Load();
+                            }
+                            return;
+                        }
+                        else if (pointerNode.Pointer is NormalExport copyingDat3 && deserializedClipboard != null)
+                        {
+                            if (rowIndex < 0) return;
+                            copyingDat3.Data.Insert(rowIndex, deserializedClipboard);
+
+                            SetUnsavedChanges(true);
+                            if (tableEditor != null)
+                            {
+                                tableEditor.Load();
+                            }
+                            return;
+                        }
+                        else
+                        {
+                            // check if we're pasting a whole export
+                            Export deserExport = null;
+                            try
+                            {
+                                deserExport = tableEditor.asset.DeserializeJsonObject(Clipboard.GetText()) as Export;
+                            }
+                            catch (Exception)
+                            {
+                                // the thing we're trying to paste probably isn't an Export
+                            }
+
+                            if (deserExport != null)
+                            {
+                                // add a new export after the current one
+                                tableEditor.asset.Exports.Insert(pointerNode.ExportNum + 1, deserExport);
+
+                                if (tableEditor != null)
+                                {
+                                    SetUnsavedChanges(true);
+                                    tableEditor.Save(true);
+                                    tableEditor.FillOutTree();
+
+                                    TreeNode newNode = SearchForTreeNode(listView1, pointerNode.ExportNum + 1);
+                                    newNode.EnsureVisible();
+                                    newNode.ExpandAll();
+                                }
+                            }
+                        }
+                    }
+                    break;
+            }
+
+            // fallback to pasting raw row data
+            if (rowIndex >= 0)
+            {
+                try
+                {
+                    string[] rawData = JsonConvert.DeserializeObject<string[]>(Clipboard.GetText());
+                    dataGridView1.Rows.Insert(rowIndex, rawData);
+                    SetUnsavedChanges(true);
+                    return;
+                }
+                catch (Exception)
+                {
+                    // the thing we're trying to paste probably isn't a string array
+                }
+            }
+
+            // fallback to normal operating system buffer
             SendKeys.Send("^V");
+        }
+
+        private void deleteToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (dataGridView1.IsCurrentCellInEditMode)
+            {
+                // fallback to normal operating system buffer
+                SendKeys.Send("{DEL}");
+                return;
+            }
+
+            if (dataGridView1.ReadOnly || !dataGridView1.AllowUserToAddRows) return;
+            if (tableEditor == null) return;
+
+            int rowIndex = dataGridView1.SelectedCells.Count > 0 ? dataGridView1.SelectedCells[0].RowIndex : -1;
+
+            switch (tableEditor.mode)
+            {
+                case TableHandlerMode.ExportData:
+                    if (listView1.SelectedNode is PointingTreeNode pointerNode)
+                    {
+                        if (pointerNode.Type == PointingTreeNodeType.ByteArray)
+                        {
+                            if (pointerNode.Pointer is RawExport)
+                            {
+                                ((RawExport)pointerNode.Pointer).Data = new byte[0];
+                            }
+                            else if (pointerNode.Pointer is NormalExport)
+                            {
+                                ((NormalExport)pointerNode.Pointer).Extras = new byte[0];
+                            }
+
+                            return;
+                        }
+                        else if (pointerNode.Pointer is StructPropertyData copyingDat1)
+                        {
+                            if (rowIndex < 0 || rowIndex >= copyingDat1.Value.Count) return;
+                            copyingDat1.Value.RemoveAt(rowIndex);
+
+                            SetUnsavedChanges(true);
+                            if (tableEditor != null)
+                            {
+                                tableEditor.Load();
+                            }
+                            return;
+                        }
+                        else if (pointerNode.Pointer is ArrayPropertyData copyingDat2)
+                        {
+                            if (rowIndex < 0 || rowIndex >= copyingDat2.Value.Length) return;
+                            List<PropertyData> origArr = copyingDat2.Value.ToList();
+                            origArr.RemoveAt(rowIndex);
+                            copyingDat2.Value = origArr.ToArray();
+
+                            SetUnsavedChanges(true);
+                            if (tableEditor != null)
+                            {
+                                tableEditor.Load();
+                            }
+                            return;
+                        }
+                        else if (pointerNode.Pointer is Export || (listView1.Focused && pointerNode.WillCopyWholeExport))
+                        {
+                            switch (pointerNode.Type)
+                            {
+                                case PointingTreeNodeType.Normal:
+                                    if (listView1.Focused)
+                                    {
+                                        DialogResult res = MessageBox.Show("Are you sure you want to delete this export?\nTHIS OPERATION CANNOT BE UNDONE!", DisplayVersion, MessageBoxButtons.OKCancel);
+                                        if (res != DialogResult.OK) break;
+
+                                        tableEditor.asset.Exports.RemoveAt(pointerNode.ExportNum);
+
+                                        SetUnsavedChanges(true);
+                                        tableEditor.Save(true);
+                                        tableEditor.FillOutTree();
+
+                                        TreeNode newNode = SearchForTreeNode(listView1, pointerNode.ExportNum);
+                                        if (newNode != null)
+                                        {
+                                            newNode.EnsureVisible();
+                                            newNode.Expand();
+                                        }
+                                    }
+                                    else if (pointerNode.Pointer is NormalExport copyingDat3)
+                                    {
+                                        if (rowIndex < 0 || rowIndex >= copyingDat3.Data.Count) return;
+                                        copyingDat3.Data.RemoveAt(rowIndex);
+
+                                        SetUnsavedChanges(true);
+                                        if (tableEditor != null)
+                                        {
+                                            tableEditor.Load();
+                                        }
+                                    }
+
+                                    return;
+                            }
+
+                            return;
+                        }
+
+                    }
+                    break;
+            }
+
+            // fallback to just deleting the whole row and refreshing
+            if (rowIndex >= 0)
+            {
+                foreach (DataGridViewCell cell in dataGridView1.Rows[rowIndex].Cells) cell.Value = null;
+                SetUnsavedChanges(true);
+                if (tableEditor != null)
+                {
+                    tableEditor.Save(true);
+                }
+            }
         }
 
         private void dataGridEditCell(object sender, EventArgs e)
@@ -648,12 +1013,12 @@ namespace UAssetGUI
             }
         }
 
-        private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)
+        public void UpdateModeFromSelectedNode(TreeNode e)
         {
-            if (e.Node == null) return;
+            if (e == null) return;
 
-            string selectedNodeText = e.Node.Text;
-            string parentSelectedNodeText = e.Node.Parent?.Text;
+            string selectedNodeText = e.Text;
+            string parentSelectedNodeText = e.Parent?.Text;
             if (tableEditor != null)
             {
                 tableEditor.mode = TableHandlerMode.ExportData;
@@ -689,6 +1054,11 @@ namespace UAssetGUI
 
                 tableEditor.Load();
             }
+        }
+
+        private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)
+        {
+            UpdateModeFromSelectedNode(e.Node);
         }
 
         private void dataGridView1_MouseWheel(object sender, MouseEventArgs e)
@@ -1094,8 +1464,21 @@ namespace UAssetGUI
                     }
                 }
             }
-            replacementPrompt.Dispose();
 
+            replacementPrompt.Dispose();
+        }
+
+        private void findToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            var findForm = new FindForm();
+            findForm.StartPosition = FormStartPosition.CenterParent;
+            findForm.Owner = this;
+            findForm.Show();
+        }
+
+        private void dataGridView1_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        {
+            dataGridView1.BeginEdit(true);
         }
     }
 }

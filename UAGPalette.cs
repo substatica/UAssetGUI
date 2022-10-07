@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
-using UAssetAPI.UnrealTypes;
 
 namespace UAssetGUI
 {
@@ -84,6 +83,10 @@ namespace UAssetGUI
                     combo.ForeColor = UAGPalette.ForeColor;
                     combo.BackColor = UAGPalette.ButtonBackColor;
                     combo.FlatStyle = CurrentTheme == UAGTheme.Light ? FlatStyle.Standard : FlatStyle.Flat;
+                }
+                if (ctrl2 is GroupBox gp)
+                {
+                    gp.ForeColor = UAGPalette.ForeColor;
                 }
 
                 if (Properties.Settings.Default.FavoriteThing.ToLowerInvariant().StartsWith("comic sans"))
